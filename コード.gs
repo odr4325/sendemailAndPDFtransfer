@@ -13,7 +13,9 @@
 #####################################################
 */
 var Cfg = {
-  debug       : true,
+  debug       : false, //true:メール送信しない（ポップアップで本文表示）
+  
+  sendLogSheet : "sendlog",
   
   configSheetName : "設定",
   fromName    : "B1",
@@ -32,7 +34,8 @@ var Cfg = {
 function onOpen() {
   var ui = SpreadsheetApp.getUi();
   ui.createMenu("Custom Menu")
-  .addItem("メール一斉送信", "listCheckSendEmail")
+  .addItem("メール一チェック", "mainCheckEmail")
+  .addItem("メール一斉送信", "mainSendEmail")
   .addSeparator()
   .addItem("初回に実行してください（実行権限の承認）", "dummyFunction")
   .addToUi()
@@ -41,9 +44,16 @@ function onOpen() {
 function dummyFunction(){
 }
 
+function mainSendEmail(){
+  var sendFlag = true;
+  listCheckSendEmail(sendFlag)
+}
+function mainCheckEmail(){
+  var sendFlag = false;
+  listCheckSendEmail(sendFlag)
+}
 
-
-function listCheckSendEmail() {
+function listCheckSendEmail(sendFlag) {
   var ret, folder = "";
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActive();
@@ -113,11 +123,9 @@ function listCheckSendEmail() {
     var exeCnt = 0;
     
     //行ごとに処理
+    var sendArrayLog = [["send status", "date", "to", "cc", "bcc", "subject", "body", "attachment", "from name", "from address"]];
     for (var i = 0; i < tgtValues.length; i++) {
       var body = mailBody1 + "\n" + mailBody2;
-      var fileObjArray = [];
-      var fileNameArray = [];
-      var attachmentArray = [];
       
       // 配信状態を設定
       var check = tgtValues[i][CDATA["CHECK"]];
@@ -130,7 +138,9 @@ function listCheckSendEmail() {
       var to  = tgtValues[i][CDATA["TO"]];
       var cc  = tgtValues[i][CDATA["CC"]];
       var bcc = tgtValues[i][CDATA["BCC"]];
-      LogSheet("INFO","["+i+"]" + to);
+      if(to == "" && cc == "" && bcc == ""){
+        continue;
+      }
       var insertData1 = tgtValues[i][CDATA["BODY1"]];
       var insertData2 = tgtValues[i][CDATA["BODY2"]];
       var insertData3 = tgtValues[i][CDATA["BODY3"]];
@@ -144,42 +154,19 @@ function listCheckSendEmail() {
       
       //添付フラグありなら添付処理開始
       var folderid
-      if(attachmentFlag == true && tgtValues[i][CDATA["ATTACHMENTFLAG"]] != ""){
-        var fileUrls = tgtValues[i][CDATA["ATTACHMENTURL"]].split(',');
-        loop: for(var j in fileUrls){
-          var id = fileUrls[j].match(/[-\w]{25,}/);
-          try{
-            DriveApp.getFileById(id);
-          }catch(e){
-            LogSheet("debug", "ファイルが存在しません。: " + id);
-            continue loop;
+      var fileObjArray = [], fileNameArray = [], attachmentArray = [];
+      if(sendFlag){
+        if(attachmentFlag == true && attachmentFlag != ""){
+          if(sendFlag){
+            ss.toast("attachment skip");
           }
-          Logger.log("id : " + id);
-          if(pdfFlag == false){
-            var fileObj = DriveApp.getFileById(id);
-          }else{
-            //格納先
-            if(folderid){
-              //指定フォルダにPDFを作成
-              var folder = DriveApp.getFolderById(folderid);
-            }else{
-              //指定なければ、元シートのカレントディレクトリに作成
-              folderid = DriveApp.getFileById(id).getParents().next().getId();
-              var folder = DriveApp.getFolderById(folderid);
-            }
-            //PDF化
-//            var pdfBlob = DriveApp.getFileById(id).getAs(MimeType.PDF);
-            //ドライブにファイルを生成する
-//            var fileObj = folder.createFile(pdfBlob);
-            var pdfRet = createPDF_(id, "", folderid);
-            var fileObj = pdfRet.obj;
-          }
-          
-          fileObjArray.push(fileObj);
-          fileNameArray.push(fileObj.getName());
-          attachmentArray.push(fileObj.getBlob());
-        } //for j
-      }//if
+          //添付ファイル処理
+          var aRet = attachmentFile_(attachmentUrl, folderid ,pdfFlag)
+          fileObjArray    = aRet.fileObjArray;
+          fileNameArray   = aRet.fileNameArray;
+          attachmentArray = aRet.attachmentArray;
+        }//if
+      }
       
       subject = subject.replace("{{データ1}}", insertData1, "g");
       subject = subject.replace("{{データ2}}", insertData2, "g");
@@ -192,39 +179,55 @@ function listCheckSendEmail() {
       body = body.replace("{{添付ファイル}}", fileNameArray.join("\n"), "g");
       
       //メール配信
-      if(Cfg.debug){
-        ui.alert(subject, body, ui.ButtonSet.OK);
-      }else{
+      var sendStatus = "";
+      var date = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm:ss");
+      if(sendFlag){
+        ss.toast(i + ", " + subject, "Sending");
+        
+        //送信処理
         var ret = sendEmail_(to, subject, body, attachmentArray, cc, bcc, fromName, fromAddress);
         
         // 配信状態を設定
-        var date = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm:ss");
         if(ret){
-          tgtSs.getRange(Cfg.stRow + i, CDATA["LOG1"] + 1, 1, 2).setValues([["配信済: " + date, "PDF化処理: " + pdfFlag + ", Folder: " + folder]]);
-          tgtSs.getRange(Cfg.stRow + i, CDATA["LOG2"] + 1).setValue(false);
+          sendStatus = "success";
+          tgtSs.getRange(Cfg.stRow + i, CDATA["LOG1"] + 1, 1, 2).setValues([
+            ["配信済: " + date,"PDF化処理: " + pdfFlag + ", Folder: " + folder]
+          ]);
+//          tgtSs.getRange(Cfg.stRow + i, CDATA["LOG2"] + 1).setValue(false);
           SpreadsheetApp.flush();
           exeCnt++
         }else{
-          tgtSs.getRange(Cfg.stRow + i, CDATA["LOG1"] + 1, 1, 2).setValues([["配信失敗: " + date, ""]]);
+          sendStatus = "failed";
+          tgtSs.getRange(Cfg.stRow + i, CDATA["LOG1"] + 1, 1, 2).setValues([
+            ["配信失敗: " + date,""]
+          ]);
           toErrCnt++
         }
+      }else{
+        sendStatus = "check";
+        ss.toast(i + ", " + subject, "Cheking (no send)");
+        //        ui.alert(subject, body, ui.ButtonSet.OK);
       }
+      LogSheet("INFO","["+i+"]" + "status: "+ sendStatus + ", to: " + to + ", cc: " + cc + ", bcc: " + bcc + ", subject: " + subject + ", attachment: " + attachmentArray);
+      sendArrayLog.push([sendStatus, date, to, cc, bcc, subject, body, attachmentArray, fromName, fromAddress]);
       
       //変換ファイルの後処理
-      if(attachmentFlag == true && pdfFlag == true && deleteFlag == true){
-        for(var k in fileObjArray){
-          var delFileName = fileObjArray[k].getName();
-          ss.toast(delFileName + "を削除します","INFO", 5)
-          LogSheet("INFO",delFileName + "を削除します");
-          fileObjArray[k].setTrashed(true);
+      if(sendFlag){
+        if(attachmentFlag == true && pdfFlag == true && deleteFlag == true){
+          for(var k in fileObjArray){
+            var delFileName = fileObjArray[k].getName();
+            ss.toast(delFileName + "を削除します","INFO", 5)
+            LogSheet("INFO",delFileName + "を削除します");
+            fileObjArray[k].setTrashed(true);
+          }
         }
-      }
-      if(attachmentFlag == true && pdfFlag == true && deleteFlag == false){
-        for(var l in fileObjArray){
-          var delFileName = fileObjArray[l].getName();
-          ss.toast(delFileName + "を退避します","INFO", 5)
-          LogSheet("INFO",delFileName + "を退避します");
-          fileObjArray[l].setName("[PDF]" + delFileName);
+        if(attachmentFlag == true && pdfFlag == true && deleteFlag == false){
+          for(var l in fileObjArray){
+            var delFileName = fileObjArray[l].getName();
+            ss.toast(delFileName + "を退避します","INFO", 5)
+            LogSheet("INFO",delFileName + "を退避します");
+            fileObjArray[l].setName("[PDF]" + delFileName);
+          }
         }
       }
       
@@ -232,8 +235,18 @@ function listCheckSendEmail() {
     // 終了確認ダイアログを表示
     
 //    ui.alert("確認", "メール一斉送信が完了しました。", ui.ButtonSet.OK);
-    ss.toast("メール一斉送信が完了しました。","INFO", 5)
-    LogSheet("INFO","MailSend メール一斉送信が完了しました。 RESULT: AllNum: " + (Cfg.stRow + i + 1) + ", exeCnt: " + exeCnt + ", skipCnt: " + skipCnt + ", toErrCnt: " + toErrCnt + ", noTgtCnt: " + noTgtCnt);
+    if(sendFlag){
+      ss.toast("メール一斉送信が完了しました。","INFO", 5)
+      LogSheet("INFO","メール一斉送信が完了しました。 RESULT: AllNum: " + (Cfg.stRow + i + 1) + ", exeCnt: " + exeCnt + ", skipCnt: " + skipCnt + ", toErrCnt: " + toErrCnt + ", noTgtCnt: " + noTgtCnt);
+    }else{
+      ss.toast("チェックが完了しました。","INFO", 5)
+      LogSheet("INFO","メールチェクが完了しました。 RESULT: AllNum: " + (Cfg.stRow + i + 1) + ", exeCnt: " + exeCnt + ", skipCnt: " + skipCnt + ", toErrCnt: " + toErrCnt + ", noTgtCnt: " + noTgtCnt);
+    }
+    
+    var logSs = ss.getSheetByName(Cfg.sendLogSheet)
+    logSs.clearContents();
+    logSs.getRange(1,1,sendArrayLog.length,sendArrayLog[0].length).setValues(sendArrayLog)
+//    .activate();
     
     // 処理を開始する行番号を初期
   }catch(e){
@@ -261,7 +274,8 @@ function sendEmail_(to, subject, body, attachments, cc, bcc, fromName, fromAddre
       from        : fromAddress
       //    noReply     : true
     };
-    GmailApp.sendEmail(to, subject, body, options);
+    var ret = GmailApp.sendEmail(to, subject, body, options);
+    Logger.log("Gmail ret : " + ret);
     return true;
   }catch(e){
     return false;
@@ -306,13 +320,13 @@ function createPDF_(ssid, filename, folderid, gid, range){
   }
   
   var fileObj = DriveApp.getFileById(ssid);
-  var filename = baseName(fileObj.getName()) + ".pdf";
   var type = fileObj.getMimeType();
+  var filename = baseName_(fileObj.getName()) + ".pdf";
 //  debugger;
   Logger.log(type);
-  LogSheet("debug",type + ", " + ssid);
+//  LogSheet("debug",type + ", " + ssid);
   
-  var docRet = getDocumentType(ssid, folder);
+  var docRet = getDocumentType_(ssid, type, folder);
   ssid    = docRet.ssid;
   setType = docRet.setType;
   opts    = docRet.opts;
@@ -339,6 +353,12 @@ function createPDF_(ssid, filename, folderid, gid, range){
   //BLOB作成
   var blob = response.getBlob();
   
+//  return {
+//    url : url + options, //ログ用
+//    blob : blob,         //メール添付用
+//    obj  : fileObj
+//  };
+  
   //PDF作成
   var fileObj = folder.createFile(blob).setName(filename);
   
@@ -356,7 +376,7 @@ function createPDF_(ssid, filename, folderid, gid, range){
 }
 
 
-function getDocumentType(ssid, folder){
+function getDocumentType_(ssid, type, folder){
   var setType, delFlag;
     //(documentごとのOption整理が必要)
   var opts = {
@@ -439,7 +459,7 @@ function convertOffice2Google_(id, folder, contentType, extension){
   //アクセストークンを取得 //add manifest:
   var token = ScriptApp.getOAuthToken();
   var blob = DriveApp.getFileById(id).getBlob();
-  var fileName = "[OFFICE]" + baseName(blob.getName());
+  var fileName = "[OFFICE]" + baseName_(blob.getName());
   var folderId = folder.getId();
   
   //ファイル変換パラメータ
@@ -474,7 +494,7 @@ function convertOffice2Google_(id, folder, contentType, extension){
   return fileDataResponse.id;
 }
 
-function baseName(str){
+function baseName_(str){
    var base = new String(str).substring(str.lastIndexOf('/') + 1); 
     if(base.lastIndexOf(".") != -1)       
         base = base.substring(0, base.lastIndexOf("."));
@@ -502,4 +522,73 @@ function getColNumber_(sheet){
     LOG1  : initData[0].indexOf("LOG1"),
     LOG2  : initData[0].indexOf("LOG2")
   }
+}
+
+//Get column number for each items
+function getColNumber2_(sheet, targetRow){
+  var initData = sheet.getSheetValues(targetRow,1,1,sheet.getLastColumn());
+  var array = ["TOADDRESS","SHEETNAME","PDFRANGE","PDFPORTRAIT","PDFFILENAME","DUMMY"];
+  var params = {};
+  for(var i in array){
+    if(initData[0].indexOf(array[i]) != -1){
+      params[array[i]] = initData[0].indexOf(array[i]);
+    }
+  }
+  return params;
+//  return {
+//    TOADDRESS : initData[0].indexOf("TOADDRESS"),
+//    SHEETNAME : initData[0].indexOf("SHEETNAME"),
+//    PDFRANGE : initData[0].indexOf("PDFRANGE"),
+//    PDFPORTRAIT : initData[0].indexOf("PDFPORTRAIT"),
+//    PDFFILENAME : initData[0].indexOf("PDFFILENAME"),
+//  }
+}
+
+function attachmentFile_(attachments, folderid, pdfFlag){
+  var fileObjArray = [], fileNameArray = [], attachmentArray = [];
+  var fileUrls = attachments.split(',');
+  
+  loop: for(var j in fileUrls){
+    var id = fileUrls[j].match(/[-\w]{25,}/);
+    try{
+      DriveApp.getFileById(id);
+    }catch(e){
+      LogSheet("debug", "ファイルが存在しません。: " + id);
+      continue loop;
+    }
+    Logger.log("id : " + id);
+    if(pdfFlag == false){
+      var fileObj = DriveApp.getFileById(id);
+    }else{
+      //格納先
+      if(folderid){
+        //指定フォルダにPDFを作成
+        var folder = DriveApp.getFolderById(folderid);
+      }else{
+        //指定なければ、元シートのカレントディレクトリに作成
+        folderid = DriveApp.getFileById(id).getParents().next().getId();
+        var folder = DriveApp.getFolderById(folderid);
+      }
+      //PDF化
+      var type = DriveApp.getFileById(id).getMimeType();
+      if(type != "application/pdf"){
+        var pdfRet = createPDF_(id, "", folderid);
+        var fileObj = pdfRet.obj;
+      }else{
+        var pdfBlob = DriveApp.getFileById(id).getAs(MimeType.PDF);
+        //ドライブにファイルを生成する
+        var fileObj = folder.createFile(pdfBlob);
+      }
+    }
+    
+    fileObjArray.push(fileObj);
+    fileNameArray.push(fileObj.getName());
+    attachmentArray.push(fileObj.getBlob());
+  } //for j
+  
+  return {
+    fileObjArray    : fileObjArray,
+    fileNameArray   : fileNameArray,
+    attachmentArray : attachmentArray
+  };
 }
